@@ -43,9 +43,13 @@ def load_data():
         df = pd.DataFrame(columns=['주문일시', '이름', '메뉴', '온도', '옵션', '수정여부'])
         df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
         return df
-    df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+    
+    dtype_dict = {'주문일시': 'object', '이름': 'object', '메뉴': 'object', '온도': 'object', '옵션': 'object'}
+    df = pd.read_csv(DATA_FILE, dtype=dtype_dict, encoding='utf-8-sig')
     if '수정여부' not in df.columns:
         df['수정여부'] = False
+    else:
+        df['수정여부'] = df['수정여부'].astype(bool)
     return df
 
 def save_order(name, menu, temp, option):
