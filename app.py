@@ -5,6 +5,17 @@ import base64
 import textwrap
 import re
 from datetime import datetime, timedelta, timezone
+import socket
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
 
 # ==========================================
 # 1. 상수 및 기본 설정
@@ -29,10 +40,13 @@ def get_base64_image(image_file):
 @st.cache_data(ttl=10)
 def load_data():
     if not os.path.exists(DATA_FILE):
-        df = pd.DataFrame(columns=['주문일시', '이름', '메뉴', '온도', '옵션'])
+        df = pd.DataFrame(columns=['주문일시', '이름', '메뉴', '온도', '옵션', '수정여부'])
         df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
         return df
-    return pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+    df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+    if '수정여부' not in df.columns:
+        df['수정여부'] = False
+    return df
 
 def save_order(name, menu, temp, option):
     now = datetime.now(KST)
@@ -44,183 +58,77 @@ def save_order(name, menu, temp, option):
     if not df.empty:
         mask = (df['이름'] == name) & (df['주문일시'].str[:10] == today_str)
         if mask.any():
-            df.loc[df[mask].index[-1], ['주문일시', '메뉴', '온도', '옵션']] = [now_str, menu, temp, option]
+            idx = df[mask].index[-1]
+            df.loc[idx, '주문일시'] = now_str
+            df.loc[idx, '메뉴'] = menu
+            df.loc[idx, '온도'] = temp
+            df.loc[idx, '옵션'] = option
+            df.loc[idx, '수정여부'] = True
             is_upd = True
             
     if not is_upd:
-        new_row = pd.DataFrame([{'주문일시': now_str, '이름': name, '메뉴': menu, '온도': temp, '옵션': option}])
+        new_row = pd.DataFrame([{'주문일시': now_str, '이름': name, '메뉴': menu, '온도': temp, '옵션': option, '수정여부': False}])
         df = pd.concat([df, new_row], ignore_index=True)
     
     df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
     load_data.clear()
     return is_upd
 
-def reset_todays_orders():
-    df = load_data()
-    if not df.empty:
-        today_str = datetime.now(KST).strftime("%Y-%m-%d")
-        df = df[df['주문일시'].str[:10] != today_str]
-        df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
-        load_data.clear()
+
 
 # ==========================================
 # 3. UI 템플릿 (CSS / JS / HTML)
 # ==========================================
-JS_TITLE_OBSERVER = """
+JS_APP_OBSERVER = """
 <script>
     const parentDoc = window.parent.document;
-    const applyTitleClick = () => {
-        const titleElements = parentDoc.querySelectorAll('h1');
-        titleElements.forEach(title => {
-            if (title.innerText.includes("오커무") && !title.dataset.hasHomeNav) {
-                title.dataset.hasHomeNav = "true";
-                title.style.position = "relative";
-                title.style.width = "fit-content";
-                
-                const textNodes = Array.from(title.childNodes).filter(n => n.nodeType === 3 && n.nodeValue.trim() !== "");
-                if (textNodes.length > 0) {
-                    const span = parentDoc.createElement("span");
-                    span.id = "dynamic-app-title";
-                    span.innerText = textNodes[0].nodeValue;
-                    title.replaceChild(span, textNodes[0]);
-                } else if (!parentDoc.getElementById('dynamic-app-title')) {
-                    title.innerHTML = `<span id="dynamic-app-title">오커무</span>`;
-                }
-                
-                if (!parentDoc.getElementById('dynamic-back-btn')) {
-                    const backBtn = parentDoc.createElement('div');
-                    backBtn.id = 'dynamic-back-btn';
-                    backBtn.className = 'back-btn';
-                    
-                    const goHome = (e) => {
-                        const tabs = parentDoc.querySelectorAll('[role="tab"]');
-                        if (tabs.length > 0) tabs[0].click();
-                        e.stopPropagation();
-                        if (e.cancelable) e.preventDefault();
-                    };
-                    backBtn.addEventListener("click", goHome);
-                    backBtn.addEventListener("touchend", goHome);
-                    title.appendChild(backBtn);
-                }
-                
-                if (!parentDoc.getElementById('dynamic-subtitle')) {
-                    const subtitle = parentDoc.createElement('div');
-                    subtitle.id = 'dynamic-subtitle';
-                    subtitle.className = 'home-subtitle';
-                    
-                    const divider = parentDoc.createElement('div');
-                    divider.className = 'home-subtitle-divider';
-                    
-                    const textDiv = parentDoc.createElement('div');
-                    textDiv.className = 'home-subtitle-text';
-                    textDiv.innerHTML = '<span>스마트한</span><span>커피 주문의 시작</span>';
-                    
-                    subtitle.appendChild(divider);
-                    subtitle.appendChild(textDiv);
-                    title.appendChild(subtitle);
+    const hideButtons = () => {
+        const buttons = Array.from(parentDoc.querySelectorAll('button'));
+        
+        ['hidden_order_btn_12345', 'hidden_history_btn_12345'].forEach(btnText => {
+            const hiddenBtn = buttons.find(b => b.innerText.includes(btnText));
+            if (hiddenBtn) {
+                const btnContainer = hiddenBtn.closest('div[data-testid="stButton"]');
+                if (btnContainer && btnContainer.style.display !== 'none') {
+                    btnContainer.style.display = 'none';
+                    btnContainer.style.height = '0px';
+                    btnContainer.style.margin = '0px';
+                    btnContainer.style.padding = '0px';
                 }
             }
         });
-        
-        const tabs = parentDoc.querySelectorAll('[role="tab"]');
-        if (tabs.length >= 3) {
-            const updateTitle = (index) => {
-                const titleSpan = parentDoc.getElementById('dynamic-app-title');
-                const mainTitle = parentDoc.querySelector('h1');
-                const backBtn = parentDoc.getElementById('dynamic-back-btn');
-                const subtitle = parentDoc.getElementById('dynamic-subtitle');
-                if (titleSpan && mainTitle) {
-                    let targetText = "오커무";
-                    let targetWidth = "fit-content";
-                    let targetJustify = "flex-start";
-                    let targetBackBtn = "none";
-                    let targetSubtitle = "flex";
-                    
-                    if (index === 1) targetText = "주문하기";
-                    else if (index === 2) targetText = "내역보기";
-                    
-                    if (index !== 0) {
-                        targetWidth = "100%";
-                        targetJustify = "center";
-                        targetBackBtn = "block";
-                        targetSubtitle = "none";
-                    }
-
-                    if (titleSpan.innerText !== targetText) titleSpan.innerText = targetText;
-                    if (mainTitle.style.width !== targetWidth) mainTitle.style.width = targetWidth;
-                    if (mainTitle.style.justifyContent !== targetJustify) mainTitle.style.justifyContent = targetJustify;
-                    if (backBtn && backBtn.style.display !== targetBackBtn) backBtn.style.display = targetBackBtn;
-                    if (subtitle && subtitle.style.display !== targetSubtitle) subtitle.style.display = targetSubtitle;
-                }
-            };
-
-            tabs.forEach((tab, index) => {
-                if (tab.getAttribute('aria-selected') === 'true') {
-                    updateTitle(index);
-                }
-                if (!tab.dataset.hasTitleListener) {
-                    tab.dataset.hasTitleListener = "true";
-                    tab.addEventListener('click', () => updateTitle(index));
-                }
-            });
-        }
     };
     
     if (!parentDoc.body.dataset.badgeObserver) {
         parentDoc.body.dataset.badgeObserver = "true";
-        const observer = new MutationObserver(() => applyTitleClick());
+        const observer = new MutationObserver(() => hideButtons());
         observer.observe(parentDoc.body, { childList: true, subtree: true });
+        
+        const urlParams = new URLSearchParams(window.parent.location.search);
+        if (urlParams.get('tab') === 'order') {
+            const checkBtns = setInterval(() => {
+                const buttons = Array.from(parentDoc.querySelectorAll('button'));
+                const orderBtn = buttons.find(b => b.innerText.includes('hidden_order_btn_12345'));
+                if (orderBtn) {
+                    orderBtn.click();
+                    clearInterval(checkBtns);
+                    
+                    const newUrl = new URL(window.parent.location.href);
+                    newUrl.searchParams.delete('tab');
+                    window.parent.history.replaceState({}, '', newUrl);
+                }
+            }, 100);
+        }
     }
 </script>
 """
 
-JS_RESET_OBSERVER = """
-<script>
-    const parentDoc = window.parent.document;
-    if (!parentDoc.getElementById('reset-btn-observer-script')) {
-        const script = parentDoc.createElement('script');
-        script.id = 'reset-btn-observer-script';
-        script.innerHTML = `
-            (() => {
-                const hideBtn = () => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const hiddenBtn = buttons.find(btn => btn.innerText.includes('reset_btn_hidden_12345'));
-                    if (hiddenBtn) {
-                        const btnContainer = hiddenBtn.closest('div[data-testid="stButton"]');
-                        if (btnContainer && btnContainer.style.display !== 'none') {
-                            btnContainer.style.display = 'none';
-                            btnContainer.style.height = '0px';
-                            btnContainer.style.margin = '0px';
-                            btnContainer.style.padding = '0px';
-                        }
-                        
-                        const icons = document.querySelectorAll('.reset-icon');
-                        icons.forEach(icon => {
-                            if (!icon.dataset.hasListener) {
-                                icon.dataset.hasListener = "true";
-                                icon.addEventListener('click', () => {
-                                    if(confirm('주문 내역을 초기화하시겠습니까?')) {
-                                        hiddenBtn.click();
-                                    }
-                                });
-                            }
-                        });
-                    }
-                };
 
-                const observer = new MutationObserver((mutations) => hideBtn());
-                observer.observe(document.body, { childList: true, subtree: true });
-                hideBtn();
-            })();
-        `;
-        parentDoc.head.appendChild(script);
-    }
-</script>
-"""
-
-def get_home_html(person_img, paper_img):
+def get_home_html():
+    local_ip = get_local_ip()
     return f"""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
     body {{
         margin: 0;
         padding: 0;
@@ -230,75 +138,108 @@ def get_home_html(person_img, paper_img):
         font-family: 'Inter', sans-serif;
         background-color: transparent;
     }}
+    .main-wrapper {{
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        align-items: center;
+    }}
     .btn-container {{ display: flex; gap: 20px; }}
+    .banner {{
+        width: 340px;
+        height: 80px;
+        border-radius: 15px;
+        background-color: #E3EDED;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        color: #333;
+        font-weight: 600;
+        font-size: 1.1rem;
+    }}
     .square-btn {{
         width: 160px;
         height: 160px;
         border-radius: 15px;
         border: none;
-        font-size: 1.4rem;
-        font-weight: 700;
         cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        gap: 15px;
-        background: rgba(255, 255, 255, 0.7);
-        color: #6F4E37;
-        border: 1px solid #6F4E37;
+        position: relative;
+        background: #ECF1FB;
+        color: #333;
+        text-align: left;
     }}
-    .icon {{
-        width: 48px;
-        height: 48px;
-        background-color: #6F4E37;
-        -webkit-mask-size: contain;
-        -webkit-mask-position: center;
-        -webkit-mask-repeat: no-repeat;
-        mask-size: contain;
-        mask-position: center;
-        mask-repeat: no-repeat;
+    .btn-text {{
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        font-size: 1.4rem;
+        font-weight: 600;
+        line-height: 1.2;
     }}
-    .icon-wrapper {{ position: relative; display: inline-block; }}
+    .material-symbols-rounded {{
+        font-size: 40px;
+        color: #333;
+        font-variation-settings: 'wght' 300, 'opsz' 40;
+    }}
+    .icon-wrapper {{
+        position: absolute;
+        bottom: 20px;
+        right: 20px;
+        display: inline-block;
+    }}
     .icon-wrapper[data-badge="true"]::after {{
         content: '';
         position: absolute;
-        top: -2px;
-        left: 40px;
-        width: 6px;
-        height: 6px;
+        top: 4px;
+        right: 4px;
+        width: 5px;
+        height: 5px;
         background-color: #FF3B30;
         border-radius: 50%;
         z-index: 10;
     }}
     </style>
-    <div class="btn-container">
-        <button class="square-btn" onclick="window.parent.document.querySelectorAll('[role=\\'tab\\']')[1].click();">
-            <div class="icon" style="-webkit-mask-image: url('data:image/png;base64,{person_img}'); mask-image: url('data:image/png;base64,{person_img}');"></div>
-            주문하기
-        </button>
-        <button class="square-btn" onclick="window.parent.document.querySelectorAll('[role=\\'tab\\']')[2].click();">
-            <div class="icon-wrapper" id="history-icon-wrapper">
-                <div class="icon" style="-webkit-mask-image: url('data:image/png;base64,{paper_img}'); mask-image: url('data:image/png;base64,{paper_img}');"></div>
+    <div class="main-wrapper">
+        <div class="btn-container">
+            <button class="square-btn" onclick="
+                const btns = Array.from(window.parent.document.querySelectorAll('button'));
+                const target = btns.find(b => b.innerText.includes('hidden_order_btn_12345'));
+                if(target) target.click();
+            ">
+                <span class="btn-text">커피<br>주문하기</span>
+                <div class="icon-wrapper">
+                    <span class="material-symbols-rounded">local_cafe</span>
+                </div>
+            </button>
+            <button class="square-btn" onclick="
+                const btns = Array.from(window.parent.document.querySelectorAll('button'));
+                const target = btns.find(b => b.innerText.includes('hidden_history_btn_12345'));
+                if(target) target.click();
+            ">
+                <span class="btn-text">주문<br>상세보기</span>
+                <div class="icon-wrapper" id="history-icon-wrapper">
+                    <span class="material-symbols-rounded">manage_search</span>
+                </div>
+            </button>
+        </div>
+        <div class="banner">
+            <div style="flex: 1; padding-left: 20px; text-align: left;">
+                <div>QR Order</div>
+                <div style="font-size: 0.75rem; font-weight: normal; color: #666; margin-top: 4px;">QR코드를 스캔하면 빠른 주문이 가능합니다.</div>
             </div>
-            내역보기
-        </button>
+            <img id="qr-code-img" style="width: 50px; height: 50px; margin-right: 20px;">
+        </div>
     </div>
     <script>
         const parentDoc = window.parent.document;
-        let copyDiv = parentDoc.getElementById('custom-copyright');
-        if (!copyDiv) {{
-            copyDiv = parentDoc.createElement('div');
-            copyDiv.id = 'custom-copyright';
-            copyDiv.innerHTML = 'ⓒ 2026 pang83. All rights reserved.';
-            copyDiv.style.position = 'absolute'; copyDiv.style.bottom = '20px'; copyDiv.style.left = '0'; copyDiv.style.width = '100%'; copyDiv.style.textAlign = 'center'; copyDiv.style.color = '#888'; copyDiv.style.fontSize = '0.75rem'; copyDiv.style.zIndex = '99'; copyDiv.style.pointerEvents = 'none';
-            
-            const marker = parentDoc.getElementById('home-bg-marker');
-            if (marker) {{
-                const tabpanel = marker.closest('div[role="tabpanel"]');
-                if (tabpanel) tabpanel.appendChild(copyDiv);
-            }}
+        
+        const currentUrl = new URL(window.parent.location.href);
+        if (currentUrl.hostname === 'localhost' || currentUrl.hostname === '127.0.0.1') {{
+            currentUrl.hostname = '{local_ip}';
         }}
+        currentUrl.searchParams.set('tab', 'order');
+        document.getElementById('qr-code-img').src = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' + encodeURIComponent(currentUrl.toString());
+
 
         const updateHomeBadge = () => {{
             const countStr = parentDoc.body.dataset.badgeCount || "0";
@@ -316,10 +257,7 @@ def get_home_html(person_img, paper_img):
 
 @st.cache_data
 def get_cached_styles():
-    bg_img = get_base64_image('cafe.jpg')
-    airplane_icon = get_base64_image('airplane.png')
     receipt_bg = get_base64_image('receipt_paper.jpg')
-    back_icon = get_base64_image('back.png')
     
     return f"""
     <style>
@@ -332,23 +270,9 @@ def get_cached_styles():
         font-display: swap;
     }}
     
-    .back-btn {{
-        display: none;
-        width: 25px;
-        height: 25px;
-        background-color: currentColor;
-        -webkit-mask: url("data:image/png;base64,{back_icon}") no-repeat center / contain;
-        mask: url("data:image/png;base64,{back_icon}") no-repeat center / contain;
-        cursor: pointer;
-        position: absolute;
-        left: 0;
-        top: 50%;
-        transform: translateY(-50%);
-        z-index: 10000;
-    }}
-    
+
     /* 배경 설정 */
-    [data-testid="stForm"], div[role="tabpanel"]:has(#home-bg-marker) {{
+    [data-testid="stAppViewBlockContainer"]:has(#home-bg-marker) {{
         position: relative !important;
         z-index: 1 !important;
         background: transparent !important;
@@ -356,58 +280,68 @@ def get_cached_styles():
         width: calc(100% + 2rem) !important;
         min-height: calc(100vh - 200px) !important;
         margin-left: -1rem !important;
+        margin-top: 1rem !important;
         border: none !important;
-        border-top: 1px solid #D0D1D5 !important;
+        border-top: 1px solid #E5E7EB !important;
         box-sizing: border-box !important;
         overflow: hidden !important;
-    }}
-    div[role="tabpanel"]:has(#home-bg-marker) {{
-        min-height: calc(100vh - 200px) !important;
-        margin-top: 1rem !important;
         display: flex;
         justify-content: center;
         align-items: center;
     }}
-    div[role="tabpanel"]:has(#home-bg-marker)::before {{
-        content: "" !important;
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
-        width: 100% !important;
-        background-image: linear-gradient(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.6)), url("data:image/jpeg;base64,{bg_img}");
-        background-size: cover !important;
-        background-position: center !important;
-        z-index: -1 !important;
-        height: 100% !important;
+    
+    [data-testid="stForm"] {{
+        position: relative !important;
+        z-index: 1 !important;
+        background: transparent !important;
+        border-radius: 0 !important;
+        width: calc(100% + 3rem) !important;
+        margin-left: -1.5rem !important;
+        margin-bottom: -1.5rem !important;
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+        padding-bottom: 1.5rem !important;
+        border: none !important;
+        border-top: 1px solid #E5E7EB !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
     }}
+    [data-testid="stAppViewBlockContainer"]:has(#home-bg-marker)::before,
     [data-testid="stForm"]::before {{
         content: "" !important;
         position: absolute !important;
         top: 0 !important;
         left: 0 !important;
         width: 100% !important;
-        background-color: #F0EDE8 !important;
+        background-color: #ffffff !important;
         z-index: -1 !important;
         height: 100% !important;
     }}
     @media (prefers-color-scheme: dark) {{
-        [data-testid="stForm"], div[role="tabpanel"]:has(#home-bg-marker) {{ border-top: 1px solid #333 !important; }}
+        [data-testid="stForm"], [data-testid="stAppViewBlockContainer"]:has(#home-bg-marker) {{ border-top: 1px solid #333 !important; }}
         [data-testid="stForm"]::before {{ background-color: #1E1E1E !important; }}
-        div[role="tabpanel"]:has(#home-bg-marker)::before {{
-            background-image: linear-gradient(rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.7)), url("data:image/jpeg;base64,{bg_img}");
+        [data-testid="stAppViewBlockContainer"]:has(#home-bg-marker)::before {{
+            background-color: #ffffff !important;
         }}
+    }}
+    
+    div[data-testid="stAppViewBlockContainer"]:has(#home-bg-marker) div.element-container:has(#st-copyright) {{
+        position: absolute !important;
+        bottom: 40px !important;
+        left: 0 !important;
+        width: 100% !important;
     }}
 
     /* 공통 UI 및 레이아웃 */
     .stButton>button {{ width: 100%; border-radius: 10px; font-weight: bold; }}
-    [data-testid="stFormSubmitButton"] {{ width: 100% !important; margin-top: 1rem !important; display: block !important; }}
+    [data-testid="stFormSubmitButton"] {{ width: 100% !important; margin-top: 0.5rem !important; display: block !important; }}
     [data-testid="stFormSubmitButton"] button {{
         background-color: #333 !important;
         color: white !important;
         border: none !important;
         box-shadow: none !important;
         width: 100% !important;
-        height: 50px !important;
+        height: 45px !important;
         padding: 0 !important;
         border-radius: 5px !important;
         display: flex !important;
@@ -426,24 +360,39 @@ def get_cached_styles():
         color: white !important;
         position: relative !important;
     }}
-    [data-testid="stFormSubmitButton"] button p::before {{
-        content: '' !important;
-        display: inline-block !important;
-        width: 22px !important;
-        height: 22px !important;
-        background-color: white !important;
-        -webkit-mask: url("data:image/png;base64,{airplane_icon}") no-repeat center / contain;
-        mask: url("data:image/png;base64,{airplane_icon}") no-repeat center / contain;
-        margin-right: 10px !important;
-        opacity: 1 !important;
-        flex-shrink: 0 !important;
-    }}
-    [data-testid="stFormSubmitButton"] button:hover, [data-testid="stFormSubmitButton"] button:active, [data-testid="stFormSubmitButton"] button:focus {{
-        background-color: #333 !important;
-        box-shadow: none !important;
-        color: white !important;
+    [data-testid="stFormSubmitButton"] .material-symbols-rounded,
+    [data-testid="stFormSubmitButton"] .material-icons,
+    [data-testid="stFormSubmitButton"] span[translate="no"] {{
+        font-size: 1.5rem !important;
     }}
     
+    [data-testid="stColumn"]:nth-child(1) [data-testid="stFormSubmitButton"] button {{
+        background-color: #ffffff !important;
+        color: #333 !important;
+        border: 1px solid #E5E7EB !important;
+    }}
+    [data-testid="stColumn"]:nth-child(1) [data-testid="stFormSubmitButton"] button p,
+    [data-testid="stColumn"]:nth-child(1) [data-testid="stFormSubmitButton"] .material-symbols-rounded,
+    [data-testid="stColumn"]:nth-child(1) [data-testid="stFormSubmitButton"] .material-icons,
+    [data-testid="stColumn"]:nth-child(1) [data-testid="stFormSubmitButton"] span[translate="no"] {{
+        color: #333 !important;
+    }}
+
+    [data-testid="stForm"] [data-testid="stHorizontalBlock"]:has([data-testid="stFormSubmitButton"]) {{
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        display: flex !important;
+        gap: 0.5rem !important;
+    }}
+    [data-testid="stForm"] [data-testid="stHorizontalBlock"]:has([data-testid="stFormSubmitButton"]) > [data-testid="stColumn"]:nth-child(1) {{
+        width: calc(20% - 0.25rem) !important;
+        min-width: calc(20% - 0.25rem) !important;
+    }}
+    [data-testid="stForm"] [data-testid="stHorizontalBlock"]:has([data-testid="stFormSubmitButton"]) > [data-testid="stColumn"]:nth-child(2) {{
+        width: calc(80% - 0.25rem) !important;
+        min-width: calc(80% - 0.25rem) !important;
+    }}
+
     .block-container {{
         max-width: 500px !important;
         margin: 0 auto !important;
@@ -453,8 +402,8 @@ def get_cached_styles():
         padding-right: 1rem !important;
     }}
     [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"], footer {{ display: none !important; }}
-    html, body, .stApp, section[data-testid="stMain"], div[data-testid="stAppViewContainer"] {{
-        overflow-y: scroll !important;
+    div[data-testid="stAppViewContainer"] {{
+        overflow-y: auto !important;
         overflow-x: hidden !important;
         scrollbar-gutter: stable !important;
     }}
@@ -465,56 +414,37 @@ def get_cached_styles():
         font-family: 'DaeguBukseongro', sans-serif !important;
         font-weight: 300 !important;
         font-size: 30px !important;
-        margin-top: -1.5rem;
-        padding-bottom: 0 !important;
+        margin: 0 !important;
+        padding-top: 15px !important;
+        padding-bottom: 40px !important;
         line-height: 40px !important;
         height: 40px !important;
         border-bottom: none !important;
-        display: flex;
-        align-items: flex-end;
     }}
-    .home-subtitle {{ display: flex; align-items: center; margin-left: 12px; height: 40px; padding-bottom: 2px; box-sizing: border-box; }}
-    .home-subtitle-divider {{ width: 1px; height: 24px; background-color: #D0D1D5; margin-right: 12px; }}
-    .home-subtitle-text {{
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        font-size: 0.7rem;
-        line-height: 1.3;
-        color: #888;
-        font-family: sans-serif;
-        font-weight: 400;
-        letter-spacing: -0.2px;
+    [data-testid="stHeadingWithActionElements"] {{ 
+        border-bottom: none !important; 
+        margin: 0 auto !important; 
+        max-width: 340px !important;
     }}
-    @media (prefers-color-scheme: dark) {{ .home-subtitle-divider {{ background-color: #555; }} .home-subtitle-text {{ color: #aaa; }} }}
-    [data-testid="stHeadingWithActionElements"] {{ border-bottom: none !important; margin-bottom: 0 !important; }}
-    div[data-baseweb="tab-list"], div[data-testid="stTabs"] [role="tablist"] {{
-        justify-content: flex-end;
-        border-bottom: none !important;
-        gap: 0 !important;
-        margin-top: 37px !important;
-        padding-right: 1px !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
-    }}
-    div[data-baseweb="tab-border"], div[data-baseweb="tab-highlight"] {{ display: none !important; background-color: transparent !important; }}
-    div[data-testid="stTabs"] {{ margin-top: -75px !important; }}
-    div[role="tabpanel"] {{ gap: 0 !important; }}
+
     [data-testid="stWidgetInstructions"], .stTextInput small, .stTextInput label + div + div {{ display: none !important; }}
 
     /* 카드 및 리스트 스타일 */
     .order-list-container {{
-        margin-left: -1rem;
-        margin-right: -1rem;
-        background-color: #F0EDE8;
+        margin-left: -1.5rem;
+        margin-right: -1.5rem;
+        margin-bottom: -1.5rem;
+        background-color: #ffffff;
         min-height: calc(100vh - 200px);
         display: flex;
         flex-direction: column;
     }}
-    .order-list-header-line {{ border-top: 1px solid #D0D1D5; margin: 0; }}
-    .order-card-wrapper {{ margin: 0 -1rem 2px -1rem; }}
+    .order-list-header-line {{ border-top: 1px solid #E5E7EB; margin: 0; }}
+    .order-card-wrapper {{ margin: 0 -1.5rem 0 -1.5rem; }}
+    .order-card-wrapper:not(:last-child) .order-card {{ border-bottom: 1px solid #E5E7EB; }}
+    .order-card.odd-card {{ background: #ffffff; }}
+    .order-card.even-card {{ background: #F9FAFA; }}
     .order-card {{
-        background: #ffffff;
         border-radius: 0;
         padding: 16px 1.5rem;
         border: none;
@@ -552,25 +482,28 @@ def get_cached_styles():
     }}
     .summary-content {{ padding: 30px 0; }}
     .receipt-date {{ text-align: left; font-size: 0.85rem; margin-bottom: 8px; color: #333; }}
-    .reset-icon {{ width: 1.3rem; height: 1.3rem; cursor: pointer; }}
 
     @media (prefers-color-scheme: dark) {{
         .order-list-container {{ background-color: #1E1E1E; }}
         .order-list-header-line {{ border-top: 1px solid #333; }}
-        .order-card {{ background: #2d2d2d; border: none; color: #eee; }}
+        .order-card.odd-card {{ background: #2d2d2d; }}
+        .order-card.even-card {{ background: #252525; }}
+        .order-card {{ border: none; color: #eee; }}
+        .order-card-wrapper:not(:last-child) .order-card {{ border-bottom: 1px solid #444; }}
         .summary-item, .summary-total, .receipt-date {{ color: #eee; }}
         .summary-box-wrapper {{ filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4)) drop-shadow(0 10px 20px rgba(0, 0, 0, 0.25)); }}
         .summary-box {{
             background-image: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url("data:image/jpeg;base64,{receipt_bg}");
             background-color: #262626;
         }}
-        div[data-baseweb="tab-list"] button[data-baseweb="tab"] {{ filter: invert(1); }}
+
         .order-no {{ color: #aaa; }}
         .order-time {{ color: #888; }}
-        .reset-icon {{ filter: invert(1); opacity: 0.8; }}
         .order-info {{ color: #aaa; }}
+        .updated-badge {{ background-color: rgba(111, 78, 55, 0.4); color: #E8D8C8; }}
     }}
-    .order-no {{ font-size: 0.65rem; font-weight: 800; color: #888; letter-spacing: 0.5px; opacity: 0.8; }}
+    .order-no {{ font-size: 0.65rem; font-weight: 800; color: #888; letter-spacing: 0.5px; opacity: 0.8; display: flex; align-items: center; gap: 4px; }}
+    .updated-badge {{ background-color: #E8EEFF; color: #245EFF; padding: 2px 4px; border-radius: 4px; font-size: 0.55rem; font-weight: 500; letter-spacing: 0; line-height: 1.2; }}
     .order-name {{ font-size: 1.15rem; font-weight: 700; line-height: 1.2; }}
     .order-time {{ font-size: 0.75rem; color: #999; }}
     .order-info {{ font-size: 0.9rem; line-height: 1.4; color: #666; }}
@@ -581,8 +514,8 @@ def get_cached_styles():
         display: flex !important;
         flex-direction: column !important;
         align-items: flex-start !important;
-        gap: 5px !important;
-        margin-bottom: 13px !important;
+        gap: 3px !important;
+        margin-bottom: 7px !important;
     }}
     [data-testid="stPills"] > label, [data-testid="stButtonGroup"] > label, [data-testid="stTextInput"] > label {{
         font-size: 0.9rem !important;
@@ -606,19 +539,17 @@ def get_cached_styles():
     }}
     button[data-variant="pills"] p, button[data-variant="pills"]:hover p, button[data-variant="pills"]:focus p {{ color: #6F4E37 !important; }}
     button[data-variant="pills"][aria-checked="true"], button[data-variant="pills"][aria-pressed="true"], button[data-variant="pills"][aria-checked="true"]:hover, button[data-variant="pills"][aria-pressed="true"]:hover {{
-        background-color: #6F4E37 !important;
+        background-color: #E8D8C8 !important;
         border: 1px solid #6F4E37 !important;
-        color: white !important;
-        font-weight: bold !important;
+        color: #6F4E37 !important;
         min-height: 37px !important;
     }}
     button[data-variant="pills"][aria-checked="true"] p, button[data-variant="pills"][aria-pressed="true"] p, button[data-variant="pills"][aria-checked="true"]:hover p, button[data-variant="pills"][aria-pressed="true"]:hover p {{
-        color: white !important;
-        font-weight: bold !important;
+        color: #6F4E37 !important;
     }}
     
-    .stTextInput div[data-testid="stTextInputRootElement"] {{ background-color: #ffffff !important; }}
-    .stTextInput div[data-testid="stTextInputRootElement"]:focus-within {{ border-color: #6F4E37 !important; background-color: #ffffff !important; }}
+    .stTextInput div[data-testid="stTextInputRootElement"] {{ background-color: #F3F4F6 !important; }}
+    .stTextInput div[data-testid="stTextInputRootElement"]:focus-within {{ border-color: #6F4E37 !important; background-color: #F3F4F6 !important; }}
     .stTextInput input {{ font-size: 16px !important; }}
 
     @media (prefers-color-scheme: dark) {{
@@ -639,6 +570,19 @@ def get_cached_styles():
         }}
         button[data-variant="pills"] p, button[data-variant="pills"]:hover p, button[data-variant="pills"]:focus p {{ color: #ccc !important; }}
     }}
+
+    /* 토스트 커스텀 스타일 */
+    [data-testid="stToast"] {{
+        background-color: #333 !important;
+        border-radius: 10px !important;
+    }}
+    [data-testid="stToast"] div, 
+    [data-testid="stToast"] p,
+    [data-testid="stToast"] span,
+    [data-testid="stToast"] button,
+    [data-testid="stToast"] i {{
+        color: #ffffff !important;
+    }}
     </style>
     """
 
@@ -652,7 +596,7 @@ def show_orders():
     html_start = textwrap.dedent('''
         <div class="order-list-container">
             <div class="order-list-header-line"></div>
-            <div style="flex: 1; padding: 0 1rem 0 1rem; display: flex; flex-direction: column;">
+            <div style="flex: 1; padding: 0 1.5rem 1.5rem 1.5rem; display: flex; flex-direction: column;">
     ''')
     
     html_end = textwrap.dedent('''
@@ -673,12 +617,11 @@ def show_orders():
     
     if df.empty or today_df.empty:
         st.markdown(re.sub(r'\n\s+', '', html_start + empty_msg + html_end), unsafe_allow_html=True)
-        st.iframe(f'<script>window.parent.document.body.dataset.badgeCount = "{len(today_df)}";</script>', height=1)
         return
     
     today_df['주문일시_dt'] = pd.to_datetime(today_df['주문일시'])
     temp_map = {'핫': 'H)', '아이스': 'I)'}
-    opt_map = {'연하게': '-1샷', '샷 추가': '+1샷', '사이즈 업': 'UP', '디카페인': 'Decaf', '두유로 변경': '두유'}
+    opt_map = {'연하게': '-1샷', '샷 추가': '+1샷', '사이즈 업': 'UP', '디카페인': 'Decaf', '두유로 변경': '두유', '오트밀크로 변경': '오트밀크'}
     
     def format_summary(r):
         base = f"{temp_map.get(r['온도'], r['온도'])} {r['메뉴']}"
@@ -707,7 +650,6 @@ def show_orders():
                 <div class="summary-content">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <div class="receipt-date" style="margin-bottom: 0;">{today.strftime('%Y-%m-%d(%a)')}</div>
-                        <img src="data:image/png;base64,{get_base64_image('reset.png')}" class="reset-icon" />
                     </div>
                     <hr style="border: 0; border-top: 1px dashed #ccc; margin: 0 0 12px 0;">
                     <div class="summary-items-container">{summary_items_html}</div>
@@ -734,15 +676,19 @@ def show_orders():
     for _, row in today_sorted.iterrows():
         opts = str(row['옵션']).strip() if pd.notna(row['옵션']) else ""
         info_text = f"{row['온도']} {row['메뉴']}" + (f" · {opts.replace(', ', ' · ')}" if opts else "")
+        bg_class = "odd-card" if row['연번'] % 2 != 0 else "even-card"
+        
+        updated_badge = '<span class="updated-badge">Updated</span>' if row.get('수정여부', False) else ''
+        
         cards_list.append(textwrap.dedent(f'''
             <div class="order-card-wrapper">
-                <div class="order-card">
+                <div class="order-card {bg_class}">
                     <div class="card-left">
                         <div class="order-name">{row["이름"]}</div>
                         <div class="order-info">{info_text}</div>
                     </div>
                     <div class="card-right">
-                        <div class="order-no">ORDER #{row["연번"]:02d}</div>
+                        <div class="order-no">{updated_badge}ORDER #{row["연번"]:02d}</div>
                         <div class="order-time">{row["주문시간_str"]}</div>
                     </div>
                 </div>
@@ -750,46 +696,74 @@ def show_orders():
         '''))
     
     st.markdown(re.sub(r'\n\s+', '', html_start + body_html + "".join(cards_list) + html_end), unsafe_allow_html=True)
-    st.iframe(f'<script>window.parent.document.body.dataset.badgeCount = "{len(today_df)}";</script>', height=1)
-    st.iframe(JS_RESET_OBSERVER, height=1)
-    
-    if st.button("reset_btn_hidden_12345"):
-        reset_todays_orders()
-        st.rerun()
 
 # ==========================================
 # 5. 메인 애플리케이션
 # ==========================================
-def main():
-    st.markdown(get_cached_styles(), unsafe_allow_html=True)
-    st.iframe(JS_TITLE_OBSERVER, height=1)
-    
-    st.title("오커무", anchor=False)
-    tab_home, tab1, tab2 = st.tabs(["홈", "주문하기", "내역보기"])
-    
-    with tab_home:
-        st.markdown('<div id="home-bg-marker"></div>', unsafe_allow_html=True)
-        st.iframe(get_home_html(get_base64_image("person.png"), get_base64_image("paper.png")), height=250)
-
-    with tab1:
-        with st.form("order_form", clear_on_submit=True):
-            name = st.text_input("이름 :red[*]", placeholder="이름을 입력하세요.")
-            menu = st.text_input("메뉴 :red[*]", placeholder="예) 아메리카노, 카페라떼")        
-            temp = st.pills("음료 온도 :red[*]", ["핫", "아이스"], selection_mode="single", label_visibility="visible")
-            option = st.pills("선택 항목", ["산미", "연하게", "샷 추가", "사이즈 업", "디카페인", "두유로 변경"], selection_mode="multi", label_visibility="visible")
+@st.dialog("주문정보 입력")
+def show_order_modal():
+    with st.form("order_form", clear_on_submit=True):
+        name = st.text_input("이름 :red[*]", placeholder="이름을 입력하세요.")
+        menu = st.text_input("메뉴 :red[*]", placeholder="예) 아메리카노, 카페라떼")        
+        temp = st.pills("음료 온도 :red[*]", ["핫", "아이스"], selection_mode="single", label_visibility="visible")
+        option = st.pills("선택 항목", ["산미", "연하게", "샷 추가", "사이즈 업", "디카페인", "두유로 변경", "오트밀크로 변경"], selection_mode="multi", label_visibility="visible")
+        
+        col1, col2 = st.columns([2, 8])
+        with col1:
+            st.form_submit_button(":material/undo:", use_container_width=True)
+        with col2:
             submitted = st.form_submit_button("제출하기", use_container_width=True)
 
-        if submitted:
-            now_ts = datetime.now().timestamp()
-            if not name.strip() or not menu.strip() or not temp:
-                st.iframe(f'<script>/* {now_ts} */ alert("이름, 메뉴, 음료 온도는 필수 항목입니다.");</script>', height=1)
-            else:
-                is_upd = save_order(name, menu.strip(), temp if temp else "", ", ".join(option) if option else "")
-                msg = "주문이 성공적으로 업데이트되었습니다!" if is_upd else "주문이 성공적으로 접수되었습니다!"
-                st.iframe(f'<script>/* {now_ts} */ alert("{msg}");</script>', height=1)
+    if submitted:
+        if not name.strip() or not menu.strip() or not temp:
+            st.toast("이름, 메뉴, 음료 온도는 필수 항목입니다.", icon=":material/error:")
+            st.markdown("""
+                <style>
+                [data-testid="stToast"] {
+                    background-color: #FBEAEA !important;
+                }
+                [data-testid="stToast"] div, 
+                [data-testid="stToast"] p,
+                [data-testid="stToast"] span,
+                [data-testid="stToast"] button,
+                [data-testid="stToast"] i {
+                    color: #AF4947 !important;
+                }
+                </style>
+            """, unsafe_allow_html=True)
+        else:
+            is_upd = save_order(name, menu.strip(), temp if temp else "", ", ".join(option) if option else "")
+            msg = "주문이 성공적으로 업데이트되었습니다!" if is_upd else "주문이 성공적으로 접수되었습니다!"
+            st.session_state.show_alert = msg
+            st.rerun()
 
-    with tab2:
-        show_orders()
+@st.dialog("주문상세")
+def show_history_modal():
+    show_orders()
+
+def main():
+    if "show_alert" in st.session_state:
+        st.toast(st.session_state.show_alert, icon=":material/check_circle:")
+        del st.session_state.show_alert
+
+    st.markdown(get_cached_styles(), unsafe_allow_html=True)
+    st.iframe(JS_APP_OBSERVER, height=1)
+    
+    df = load_data()
+    today_str = datetime.now(KST).strftime("%Y-%m-%d")
+    today_count = len(df[df['주문일시'].str[:10] == today_str]) if not df.empty else 0
+    st.iframe(f'<script>window.parent.document.body.dataset.badgeCount = "{today_count}";</script>', height=1)
+    
+    st.title("오커무", anchor=False)
+    
+    st.markdown('<div id="home-bg-marker"></div>', unsafe_allow_html=True)
+    st.iframe(get_home_html(), height=280)
+    st.markdown("<div id='st-copyright'></div><p style='text-align: center; color: #888; font-size: 0.75rem; margin: 0; pointer-events: none;'>ⓒ 2026 pang83. All rights reserved.</p>", unsafe_allow_html=True)
+
+    if st.button("hidden_order_btn_12345"):
+        show_order_modal()
+    if st.button("hidden_history_btn_12345"):
+        show_history_modal()
 
 if __name__ == "__main__":
     main()
